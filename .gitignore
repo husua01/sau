@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.pnpm-store/**
+# Build outputs
+.next/
+dist/
+out/
+# Hardhat artifacts & cache
+artifacts/
+cache/
+typechain-types/
+# Env & logs
+.env
+.env.*.local
+.env.local
+*.log
+.DS_Store
+# Sensitive wallet info
+ARWEAVE_WALLET_INFO.md
+*WALLET_INFO.md
+*.backup

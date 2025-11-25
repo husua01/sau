@@ -1,0 +1,78 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Noto Sans KR, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* 모바일 최적화: 텍스트 오버플로우 처리 */
+.text-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  whiteSpace: nowrap;
+}
+
+/* 모바일 최적화: 긴 숫자/ID 줄바꿈 */
+.break-word {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* 반응형 컨테이너 */
+.responsive-container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: clamp(8px, 2vw, 16px);
+}
+
+/* 반응형 버튼 */
+.responsive-button {
+  padding: clamp(8px, 2vw, 12px) clamp(12px, 3vw, 24px);
+  font-size: clamp(0.75rem, 2.5vw, 1rem);
+  border-radius: clamp(4px, 1vw, 8px);
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+/* NFT 카드 호버 효과 */
+.hover-nft-card {
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.hover-nft-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* 스피너 애니메이션 */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 모바일: 작은 화면에서 추가 최적화 */
+@media (max-width: 640px) {
+  body {
+    font-size: 14px;
+  }
+  
+  input[type="number"],
+  input[type="text"],
+  textarea {
+    font-size: 16px !important; /* iOS 확대 방지 */
+  }
+  
+  button {
+    min-height: 44px; /* 터치 타겟 최적화 */
+  }
+}
+
