@@ -71,26 +71,14 @@ function ensureServerSide() {
   }
 }
 
-function normalizeDataPayload(data: string | Buffer): Buffer {
-  if (Buffer.isBuffer(data)) {
-    return data;
-  }
-
-  if (data.startsWith("data:")) {
-    const [, base64Segment] = data.split(",");
-    return Buffer.from(base64Segment, "base64");
-  }
-
-  const isBase64 = /^[A-Za-z0-9+/=]+$/.test(data) && data.length % 4 === 0;
-  if (isBase64) {
-    try {
-      return Buffer.from(data, "base64");
-    } catch {
-      // fall through
-    }
-  }
-
-  return Buffer.from(data, "utf8");
+// 문자열은 무조건 UTF-8 바이트 그대로 저장한다. "base64처럼 생겼으면 디코딩한다"는
+// 휴리스틱이 있었는데, 이 함수에 실제로 들어오는 유일한 페이로드인 Lit 암호문이
+// 정확히 표준 base64 문자열이라 항상 오탐했다 — 서버가 암호문을 디코딩해 바이너리로
+// 저장하고, 클라이언트는 그걸 res.text()로 읽어 깨진 UTF-8을 받으면서 모든 콘텐츠가
+// 영구히 복호화 불가능해졌다. 저장한 문자열이 그대로 돌아오는 것이 이 함수의 계약이다.
+// (호출부의 크기 검사도 Buffer.byteLength(content, "utf8") 기준이라 이쪽과 일치한다.)
+export function normalizeDataPayload(data: string | Buffer): Buffer {
+  return Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
 }
 
 // Arweave에 데이터 업로드
@@ -196,36 +184,5 @@ export async function fetchFromArweave(arweaveId: string): Promise<string> {
   } catch (error) {
     console.error("❌ Arweave 데이터 조회 실패:", error);
     throw new Error("데이터 조회에 실패했습니다.");
-  }
-}
-
-// 업로드 비용 계산
-export async function calculateUploadCost(dataSize: number): Promise<{
-  arweaveCost: string;
-  irysCost: string;
-  totalCost: string;
-}> {
-  try {
-    if (typeof window !== "undefined") {
-      throw new Error("Arweave 비용 계산은 서버 환경에서만 가능합니다.");
-    }
-
-    const { arweave } = await createArweaveClient();
-
-    const price = await arweave.transactions.getPrice(dataSize);
-    const arCost = arweave.ar.winstonToAr(price);
-
-    console.log(`💰 실제 비용: ${arCost} AR (${dataSize} bytes)`);
-
-    return {
-      arweaveCost: arCost,
-      irysCost: "0",
-      totalCost: arCost,
-    };
-  } catch (error) {
-    console.error("❌ Arweave 비용 계산 실패:", error);
-    throw error instanceof Error
-      ? error
-      : new Error("Arweave 비용 계산에 실패했습니다.");
   }
 }

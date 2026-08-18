@@ -1,11 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { checkNFTOwnership, getProvider } from "../../../lib/blockchain";
+import {
+  checkNFTOwnership,
+  getProvider,
+  resolveTokenURI,
+  isValidArweaveId,
+} from "../../../lib/blockchain";
 import { uploadToArweave, fetchFromArweave } from "../../../lib/arweave";
-import { createAccessControlConditions } from "../../../lib/lit-protocol";
+import {
+  createAccessControlConditions,
+  describeAccessConditionMismatch,
+} from "../../../lib/lit-protocol";
 import { verifySiwe } from "@/lib/auth";
-import { rateLimit, getClientIp } from "@/lib/rate-limit";
+import { rateLimit, byteQuota, getClientIp } from "@/lib/rate-limit";
 import { del } from "@vercel/blob";
-import { MAX_SHARED_CONTENT_BYTES } from "@/lib/upload-limits";
+import {
+  MAX_SHARED_CONTENT_BYTES,
+  MAX_CONTENT_BYTES_PER_ADDRESS_PER_DAY,
+  MAX_CONTENT_BYTES_GLOBAL_PER_DAY,
+  CONTENT_QUOTA_WINDOW_MS,
+} from "@/lib/upload-limits";
 import { ethers } from "ethers";
 
 // 50MB 페이로드를 내려받아 Arweave에 서명·전송하는 시간을 감안해 기본
@@ -242,11 +255,24 @@ async function handleGetNFTMetadata(data: any, ip: string) {
 
     const metadata = await response.json();
 
+    // /access는 이 응답의 encryptionData로도 복호화를 시작하므로, test_access와
+    // 똑같이 접근 조건이 이 NFT를 가리키는지 확인해준다(한쪽만 검사하면 우회된다).
+    const creatorConditions =
+      metadata?.properties?.encryptionData?.accessControlConditions ??
+      metadata?.encryptionData?.accessControlConditions;
+
     return NextResponse.json({
       success: true,
       metadata,
       hasData: true,
       tokenURI: resolvedURI,
+      accessConditionWarning: creatorConditions
+        ? describeAccessConditionMismatch(
+            creatorConditions,
+            contractAddress,
+            String(tokenId),
+          )
+        : null,
     });
   } catch (error) {
     return NextResponse.json(
@@ -258,15 +284,6 @@ async function handleGetNFTMetadata(data: any, ip: string) {
       { status: 500 },
     );
   }
-}
-
-function resolveTokenURI(tokenURI: string): string {
-  if (!tokenURI) return tokenURI;
-  if (tokenURI.startsWith("ipfs://")) {
-    const path = tokenURI.replace("ipfs://", "");
-    return `https://ipfs.io/ipfs/${path}`;
-  }
-  return tokenURI;
 }
 
 // 공유 콘텐츠 업로드 핸들러
@@ -347,6 +364,53 @@ async function handleUploadSharedContent(data: any, ip: string) {
         return NextResponse.json(
           { success: false, error: "Content too large (max 50MB)" },
           { status: 413 },
+        );
+      }
+
+      // 여기부터가 운영자 Arweave 잔액이 실제로 빠져나가는 지점이다. 건당 크기 제한만으로는
+      // 반복 업로드를 막을 수 없으므로 일일 누적 상한을 두 단계로 본다.
+      //  - 주소별: 지갑 하나가 태울 수 있는 양을 고정
+      //  - 전역:   지갑을 갈아타며 주소별 상한을 반복 획득하는 걸 막고, 운영자가 하루에
+      //            잃을 수 있는 최대치를 고정 (도달 시 정상 사용자도 막히지만 파산보다 낫다)
+      // 전역 먼저 확인하면 주소별 카운터를 소모하지 않고 거절할 수 있다.
+      if (
+        !byteQuota(
+          "arweave-bytes:global",
+          contentByteLength,
+          MAX_CONTENT_BYTES_GLOBAL_PER_DAY,
+          CONTENT_QUOTA_WINDOW_MS,
+        )
+      ) {
+        console.error(
+          "🚨 Arweave 전역 일일 업로드 한도 도달 — 대납 지갑 소진 공격 가능성을 확인하세요.",
+        );
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Service upload quota exceeded",
+            message:
+              "플랫폼 전체의 24시간 업로드 한도에 도달했습니다. 잠시 후 다시 시도해주세요.",
+          },
+          { status: 503 },
+        );
+      }
+
+      if (
+        !byteQuota(
+          `arweave-bytes:${targetAddress.toLowerCase()}`,
+          contentByteLength,
+          MAX_CONTENT_BYTES_PER_ADDRESS_PER_DAY,
+          CONTENT_QUOTA_WINDOW_MS,
+        )
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Daily upload quota exceeded",
+            message:
+              "이 주소의 24시간 업로드 한도를 초과했습니다. 잠시 후 다시 시도해주세요.",
+          },
+          { status: 429 },
         );
       }
 
@@ -556,6 +620,12 @@ async function handleTestAccess(data: any, ip: string) {
     let arweaveContent: string | null = null;
     let arweaveFetchError: string | null = null;
 
+    if (arweaveId && !isValidArweaveId(arweaveId)) {
+      arweaveId = null;
+      arweaveUrl = null;
+      arweaveFetchError = "Arweave ID 형식이 올바르지 않습니다.";
+    }
+
     if (arweaveId) {
       try {
         arweaveContent = await fetchFromArweave(arweaveId);
@@ -571,6 +641,16 @@ async function handleTestAccess(data: any, ip: string) {
     const accessControlConditions =
       encryptionData?.accessControlConditions ||
       createAccessControlConditions(contractAddress, normalizedTokenId);
+
+    // 창작자가 써 넣은 접근 조건이 정말 이 NFT를 가리키는지 확인한다. 어긋나면
+    // 이 NFT를 사도(혹은 이미 소유해도) 콘텐츠를 열 수 없다는 뜻이므로 경고를 실어 보낸다.
+    const accessConditionWarning = encryptionData?.accessControlConditions
+      ? describeAccessConditionMismatch(
+          encryptionData.accessControlConditions,
+          contractAddress,
+          normalizedTokenId,
+        )
+      : null;
 
     // arweaveId가 가리키는 콘텐츠는 [Lit 암호화 이후 업로드] 정책에 따라 이제
     // 항상 암호문이다(평문이 아님). 그대로 decryptedContent에 넣으면 클라이언트에
@@ -589,6 +669,7 @@ async function handleTestAccess(data: any, ip: string) {
       arweaveUrl,
       encryptionData,
       accessControlConditions,
+      accessConditionWarning,
       decryptedContent: isEncrypted ? null : arweaveContent,
       message: isEncrypted
         ? "NFT에 연결된 데이터를 찾았습니다. 클라이언트에서 복호화를 진행합니다."
@@ -709,6 +790,18 @@ async function handleCalculateCost(data: any, ip: string) {
       return NextResponse.json(
         { success: false, error: "Too many requests" },
         { status: 429 },
+      );
+    }
+
+    // 나머지 5개 액션과 동일하게 SIWE를 요구한다. 사용자 데이터를 돌려주지는 않지만
+    // 운영자 RPC 쿼터를 쓰는 호출이라, 유일하게 인증 없는 액션으로 남겨둘 이유가 없다.
+    const { siweMessage, siweSignature } = data;
+    const targetAddress = data.userAddress ?? data.walletAddress;
+    const auth = verifySiwe(siweMessage, siweSignature, targetAddress);
+    if (!auth.ok) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized", message: auth.reason },
+        { status: 401 },
       );
     }
 
@@ -901,12 +994,10 @@ async function handleGetUserNFTs(data: any, ip: string) {
         null,
         userAddress,
       );
-      const allContentCreatedFilter = contract.filters.ContentCreated();
 
       const collectEventsWithFallback = async (
         filter: any,
         description: string,
-        includeAll: boolean = false,
       ) => {
         try {
           return await queryFilterInRanges(
@@ -918,9 +1009,7 @@ async function handleGetUserNFTs(data: any, ip: string) {
         } catch (error) {
           // SAU_DEPLOYMENT_BLOCK부터의 조회가 실패했다고 0번 블록부터 전체를
           // 재스캔하면 [4-8]에서 줄이려는 RPC 호출 수가 그대로 되살아난다.
-          if (includeAll) {
-            throw error;
-          }
+          console.warn(`⚠️ ${description} 이벤트 조회 실패:`, error);
           return [];
         }
       };
@@ -993,30 +1082,14 @@ async function handleGetUserNFTs(data: any, ip: string) {
         );
       }
 
-      try {
-        const createdEventsAll = await collectEventsWithFallback(
-          allContentCreatedFilter,
-          "ContentCreated(전체)",
-          true,
-        );
-        console.log(
-          `🔍 ContentCreated(전체) 이벤트에서 ${createdEventsAll.length}개 로그 확인`,
-        );
-        for (const event of createdEventsAll) {
-          const eventArgs = (event as any).args;
-          const rawId = eventArgs?.tokenId;
-          const tokenId =
-            rawId !== undefined && rawId !== null ? rawId.toString() : null;
-          if (tokenId && tokenId !== "0") {
-            foundTokenIds.add(tokenId);
-          }
-        }
-      } catch (allContentError) {
-        console.warn(
-          "⚠️ ContentCreated(전체) 이벤트 조회 실패:",
-          allContentError,
-        );
-      }
+      // (예전엔 여기서 필터 없는 ContentCreated() — 즉 플랫폼 전체의 모든 창작
+      // 이벤트 — 를 한 번 더 훑어 모든 tokenId를 foundTokenIds에 넣었다. 뒤에서
+      // balanceOf로 걸러지긴 했지만, 그 말은 사용자 한 명의 목록 조회가 "지금까지
+      // 발행된 전체 NFT 수"만큼 balanceOf를 호출한다는 뜻이었다 — 삭제한
+      // 1~1000 brute-force 폴백과 같은 종류의 RPC 쿼터 증폭이고, 플랫폼이 커질수록
+      // 나빠진다. 사용자가 보유한 토큰은 반드시 TransferSingle/TransferBatch의
+      // to=userAddress로 들어오므로(민팅도 from=0x0인 TransferSingle) 위 세 필터로
+      // 이미 전부 덮인다. 완전히 중복이라 제거한다.)
 
       console.log(
         `🔍 이벤트에서 발견된 토큰 ID: ${Array.from(foundTokenIds).join(", ") || "없음"}`,
@@ -1115,23 +1188,15 @@ async function handleGetUserNFTs(data: any, ip: string) {
                 ? `SAU 플랫폼에서 생성된 NFT #${tokenId}. 콘텐츠 해시: ${contentHash.substring(0, 20)}...`
                 : `SAU 플랫폼에서 생성된 NFT #${tokenId}`);
 
+            // 후보는 실제로 '이미지'인 필드만 넣는다. 예전엔 여기에
+            // coverImageMetadata(Ipfs)Url — 이미지가 아니라 JSON 메타데이터 URL — 과
+            // contentHash(= 암호문의 Arweave ID)까지 들어 있어서, image 필드가 비면
+            // 커버 이미지 자리에 JSON이나 암호문을 <img src>로 걸어 깨진 이미지를
+            // 보여주게 되어 있었다.
             const candidateImageUrls = [
               resolveMediaUrl(metadataFromURI?.image),
               resolveMediaUrl(metadataFromURI?.image_url),
-              resolveMediaUrl(metadataFromURI?.imageData),
               resolveMediaUrl(metadataFromURI?.properties?.coverImageUrl),
-              resolveMediaUrl(
-                metadataFromURI?.properties?.coverImageMetadataUrl,
-              ),
-              resolveMediaUrl(
-                metadataFromURI?.properties?.coverImageMetadataIpfsUrl,
-              ),
-              resolveMediaUrl(metadataFromURI?.properties?.arweaveUrl),
-              resolveMediaUrl(
-                contentHash && contentHash !== ""
-                  ? `https://arweave.net/${contentHash}`
-                  : null,
-              ),
             ].filter(Boolean) as string[];
 
             const coverImageUrl =

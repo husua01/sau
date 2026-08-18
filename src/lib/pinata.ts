@@ -207,33 +207,3 @@ export async function uploadMetadataToPinata(
     };
   }
 }
-
-/**
- * Pinata 계정 정보 확인 (API 키 유효성 검증)
- */
-export async function verifyPinataConnection(): Promise<boolean> {
-  try {
-    const pinataApiKey = process.env.PINATA_API_KEY;
-    const pinataSecretKey = process.env.PINATA_SECRET_KEY;
-
-    if (!pinataApiKey || !pinataSecretKey) {
-      return false;
-    }
-
-    const response = await fetch(
-      "https://api.pinata.cloud/data/testAuthentication",
-      {
-        method: "GET",
-        headers: {
-          pinata_api_key: pinataApiKey,
-          pinata_secret_api_key: pinataSecretKey,
-        },
-      },
-    );
-
-    return response.ok;
-  } catch (error) {
-    console.error("Pinata 연결 확인 실패:", error);
-    return false;
-  }
-}

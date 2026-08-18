@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uploadImageToPinata, uploadMetadataToPinata } from "@/lib/pinata";
+import { uploadImageToPinata } from "@/lib/pinata";
 import { verifySiwe } from "@/lib/auth";
 import { rateLimit, getClientIp } from "@/lib/rate-limit";
 
@@ -80,74 +80,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. OpenSea 표준 메타데이터 생성
-    const metadata = {
-      name: title || imageFile.name,
-      description:
-        description || `NFT created with SAU Platform - ${imageFile.name}`,
-      image: imageResult.ipfsUrl, // ipfs://QmXxx...
-      external_url: imageResult.pinataUrl, // https://gateway.pinata.cloud/ipfs/QmXxx...
-      attributes: [
-        {
-          trait_type: "File Name",
-          value: imageFile.name,
-        },
-        {
-          trait_type: "File Size",
-          value: `${imageFile.size} bytes`,
-        },
-        {
-          trait_type: "Content Type",
-          value: imageFile.type,
-        },
-        {
-          trait_type: "Storage",
-          value: "IPFS",
-        },
-        {
-          trait_type: "Platform",
-          value: "SAU",
-        },
-      ],
-      properties: {
-        files: [
-          {
-            uri: imageResult.ipfsUrl,
-            type: imageFile.type,
-          },
-        ],
-        category: "image",
-      },
-      // ERC-1155 표준 필드
-      decimals: 0,
-      background_color: "ffffff",
-      animation_url: null,
-      youtube_url: null,
-    };
+    // 이 라우트는 커버 이미지만 올린다. 예전에는 여기서 이미지용 메타데이터 JSON을
+    // 한 번 더 Pinata에 올렸는데, 실제 tokenURI로 쓰이는 메타데이터는
+    // /api/upload-nft-metadata가 따로 만들기 때문에 그 JSON은 아무도 읽지 않았다
+    // (민팅마다 쓰이지 않는 파일이 하나씩 IPFS에 영구히 쌓였다). 삭제했다.
+    console.log("✅ NFT 커버 이미지 업로드 완료:", imageResult.ipfsHash);
 
-    // 3. 메타데이터를 Pinata IPFS에 업로드
-    const metadataResult = await uploadMetadataToPinata(
-      metadata,
-      `metadata-${Date.now()}.json`,
-    );
-
-    if (!metadataResult.success) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: `Metadata upload failed: ${metadataResult.error}`,
-          message: "메타데이터 업로드에 실패했습니다.",
-        },
-        { status: 500 },
-      );
-    }
-
-    console.log("✅ NFT 이미지 및 메타데이터 업로드 완료:", {
-      imageHash: imageResult.ipfsHash,
-      metadataHash: metadataResult.ipfsHash,
-    });
-
-    // 4. 결과 반환
     return NextResponse.json({
       success: true,
       image: {
@@ -155,17 +93,7 @@ export async function POST(request: NextRequest) {
         ipfsUrl: imageResult.ipfsUrl,
         gatewayUrl: imageResult.pinataUrl,
       },
-      metadata: {
-        hash: metadataResult.ipfsHash,
-        ipfsUrl: metadataResult.ipfsUrl,
-        gatewayUrl: metadataResult.pinataUrl,
-      },
-      // 기존 API와 호환성을 위한 필드들
-      contentId: metadataResult.ipfsHash,
-      contentUrl: metadataResult.pinataUrl,
-      // NFT 발급에 필요한 정보
       imageUrl: imageResult.pinataUrl,
-      metadataUrl: metadataResult.pinataUrl,
     });
   } catch (error) {
     console.error("❌ NFT 이미지 업로드 API 오류:", error);

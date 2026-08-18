@@ -2,7 +2,7 @@
   "name": "sau",
   "private": true,
   "version": "0.1.0",
-  "description": "SAU: NFT 생성과 동시에 자동 접근 제어가 설정되는 탈중앙화 영구 저장 및 콘텐츠 플랫폼",
+  "description": "SAU: NFT 소유를 조건으로 콘텐츠 열람을 여는 게이트 — 생성과 동시에 자동 암호화, 복호화 시점에 해당 NFT 보유 필요",
   "license": "MIT",
   "scripts": {
     "dev": "next dev",

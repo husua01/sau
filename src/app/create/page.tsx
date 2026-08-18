@@ -3,13 +3,17 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { ethers } from "ethers";
-import { processTextAsFile, encryptFile } from "@/lib/file-encryption";
+import {
+  processTextAsFile,
+  encryptFile,
+  downloadFile,
+} from "@/lib/file-encryption";
 import {
   initLitClient,
   encryptWithLit,
   createAccessControlConditions,
+  MIN_HOLDING_SECONDS,
 } from "@/lib/lit-protocol";
-import { keccak256, toUtf8Bytes } from "ethers";
 import { buildSiweMessage } from "@/lib/auth";
 import { upload as uploadToBlob } from "@vercel/blob/client";
 
@@ -67,21 +71,19 @@ async function signedFetch(action: string, payload: Record<string, any>) {
   });
 }
 
-function generateTokenId(address: string, index: number) {
-  const normalizedAddress = address?.toLowerCase() || "0x";
-  const randomValues = new Uint32Array(2);
-  if (
-    typeof crypto !== "undefined" &&
-    typeof crypto.getRandomValues === "function"
-  ) {
-    crypto.getRandomValues(randomValues);
-  } else {
-    randomValues[0] = Math.floor(Math.random() * 0xffffffff);
-    randomValues[1] = Math.floor(Math.random() * 0xffffffff);
-  }
-  const entropy = `${normalizedAddress}-${Date.now()}-${index}-${randomValues[0]}-${randomValues[1]}-${Math.random()}`;
-  const hash = keccak256(toUtf8Bytes(entropy));
-  return BigInt(hash).toString();
+// 컨트랙트의 mintOwn은 tokenId 상위 160비트가 호출자 주소와 같을 것을 요구한다
+// (같은 id로 앞질러 민팅해 암호문을 가로채는 front-running 방지). 그래서 주소를
+// 그대로 상위 비트에 싣고 하위 96비트만 무작위로 채운다.
+// Math.random() 폴백은 두지 않는다 — crypto.getRandomValues가 없는 환경이면 Lit
+// 암호화 자체가 동작하지 않고, 예측 가능한 tokenId를 만드느니 여기서 실패하는 게 낫다.
+function generateTokenId(address: string) {
+  const random = new Uint8Array(12); // 96비트
+  crypto.getRandomValues(random);
+  const suffix = BigInt(
+    "0x" +
+      Array.from(random, (b) => b.toString(16).padStart(2, "0")).join(""),
+  );
+  return ((BigInt(address) << 96n) | suffix).toString();
 }
 export default function CreateNFTPage() {
   const configuredContractAddress =
@@ -331,9 +333,7 @@ export default function CreateNFTPage() {
 
       // 커버 이미지 처리 (Pinata IPFS 업로드)
       let coverImageUrl: string | null = null;
-      let coverImageMetadataUrl: string | null = null;
       let coverImageIpfsUrl: string | null = null;
-      let coverImageMetadataIpfsUrl: string | null = null;
       const metadataUploadCache = new Map<
         string,
         {
@@ -376,9 +376,7 @@ export default function CreateNFTPage() {
 
           if (uploadData.success) {
             coverImageUrl = uploadData.imageUrl;
-            coverImageMetadataUrl = uploadData.metadataUrl;
             coverImageIpfsUrl = uploadData.image?.ipfsUrl || null;
-            coverImageMetadataIpfsUrl = uploadData.metadata?.ipfsUrl || null;
             console.log(" 커버 이미지 Pinata IPFS 업로드 완료:", coverImageUrl);
           } else {
             console.warn(" Pinata 업로드 실패, base64로 폴백");
@@ -496,8 +494,6 @@ export default function CreateNFTPage() {
                   ciphertextUrl: sharedContentUrl,
                 }
               : null,
-            coverImageMetadataUrl,
-            coverImageMetadataIpfsUrl,
           },
         };
 
@@ -551,7 +547,7 @@ export default function CreateNFTPage() {
 
       // 1. Token ID 생성
       const preGeneratedTokenIds: string[] = [];
-      const tokenId = generateTokenId(mintingAddress, 0);
+      const tokenId = generateTokenId(mintingAddress);
       preGeneratedTokenIds.push(tokenId);
 
       let sharedContentHash = "";
@@ -801,13 +797,7 @@ export default function CreateNFTPage() {
           isTextContent,
           fileName,
           tokenURI: finalTokenURI,
-          metadataSource:
-            metadataInfo?.source ||
-            (coverImageMetadataIpfsUrl
-              ? "pinata-ipfs"
-              : coverImageMetadataUrl
-                ? "pinata-gateway"
-                : "fallback"),
+          metadataSource: metadataInfo?.source ?? null,
           metadataIpfsHash: metadataInfo?.ipfsHash || null,
         });
 
@@ -829,7 +819,38 @@ export default function CreateNFTPage() {
 
       const hasEncryptionData = encryptionDataMap.size > 0;
 
+      // Lit이 종료·리셋되면 암호문은 영구히 복호화 불가능해진다. 그런데 복구 수단은
+      // 이미 존재한다 — 창작자 디스크에 있는 원본 파일이다. 별도의 백업 암호화를 새로
+      // 만들 필요 없이, "원본을 보관해야 한다"는 사실과 재발행에 필요한 식별 정보만
+      // 남기면 전손을 막을 수 있다.
+      const primary = results[0];
+      const primaryEncryption = primary?.tokenId
+        ? encryptionDataMap.get(primary.tokenId)
+        : undefined;
+      const recoveryInfo = primary?.success
+        ? {
+            _readme:
+              "이 NFT의 콘텐츠 키는 Lit Protocol 네트워크가 보관합니다. Lit이 종료되거나 네트워크가 리셋되면 아래 암호문은 영구히 복호화할 수 없습니다. 원본 파일을 반드시 별도로 보관하세요 — 그것이 유일한 복구 수단입니다.",
+            tokenId: primary.tokenId,
+            contractAddress,
+            chainId: walletState.chainId,
+            litNetwork: process.env.NEXT_PUBLIC_LIT_NETWORK ?? null,
+            litChain: process.env.NEXT_PUBLIC_LIT_CHAIN ?? null,
+            minHoldingSeconds: MIN_HOLDING_SECONDS,
+            tokenURI: primary.tokenURI,
+            ciphertextUrl: sharedContentUrl,
+            contentHash: primary.contentHash,
+            dataToEncryptHash: primaryEncryption?.dataToEncryptHash ?? null,
+            fileName,
+            mimeType: primaryEncryption?.mimeType ?? null,
+            encoding: primaryEncryption?.encoding ?? null,
+            transactionHash: primary.transactionHash,
+            mintedAt: new Date().toISOString(),
+          }
+        : null;
+
       setResult({
+        recoveryInfo,
         success: successCount > 0,
         totalRequested: 1,
         successCount: successCount,
@@ -840,13 +861,14 @@ export default function CreateNFTPage() {
             ? {
                 url: coverImageUrl || null,
                 ipfsUrl: coverImageIpfsUrl || null,
-                metadataUrl: coverImageMetadataUrl || null,
-                metadataIpfsUrl: coverImageMetadataIpfsUrl || null,
                 name: coverImage?.name || null,
                 type: coverImage?.type || null,
               }
             : null,
-        message: `${successCount}개의 NFT가 성공적으로 생성되었습니다! ${failureCount > 0 ? `(${failureCount}개 실패)` : ""}`,
+        message:
+          successCount > 0
+            ? "NFT가 성공적으로 생성되었습니다!"
+            : `NFT 생성에 실패했습니다: ${results[0]?.error ?? "알 수 없는 오류"}`,
         hasEncryption: hasEncryptionData || isTextContent,
       });
 
@@ -880,14 +902,9 @@ export default function CreateNFTPage() {
   // 비용 계산 함수
   const calculateCost = async (contentSize: number) => {
     try {
-      const gasResponse = await fetch("/api/unified", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "calculate_cost",
-          nftCount: 1,
-          contentSize,
-        }),
+      const gasResponse = await signedFetch("calculate_cost", {
+        nftCount: 1,
+        contentSize,
       });
 
       const gasData = await gasResponse.json();
@@ -1662,6 +1679,66 @@ export default function CreateNFTPage() {
               >
                 {result.message}
               </p>
+
+              {result.recoveryInfo && (
+                <div
+                  style={{
+                    marginTop: "12px",
+                    padding: "12px",
+                    backgroundColor: "#fffbeb",
+                    borderRadius: "6px",
+                    border: "1px solid #f59e0b",
+                  }}
+                >
+                  <p
+                    style={{
+                      margin: "0 0 8px 0",
+                      fontWeight: 600,
+                      color: "#92400e",
+                    }}
+                  >
+                    ⚠️ 원본 파일을 반드시 보관하세요
+                  </p>
+                  <p
+                    style={{
+                      margin: "0 0 12px 0",
+                      fontSize: "14px",
+                      color: "#92400e",
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    콘텐츠를 복호화하는 키는 Lit Protocol 네트워크가 보관합니다.
+                    Lit이 종료되거나 네트워크가 리셋되면 이 NFT의 콘텐츠는{" "}
+                    <strong>영구히 복호화할 수 없습니다.</strong> 방금 업로드한
+                    원본 파일이 유일한 복구 수단입니다.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      downloadFile(
+                        new Blob(
+                          [JSON.stringify(result.recoveryInfo, null, 2)],
+                          { type: "application/json" },
+                        ),
+                        `sau-recovery-${result.recoveryInfo.tokenId}.json`,
+                      )
+                    }
+                    style={{
+                      padding: "10px 16px",
+                      minHeight: "44px",
+                      backgroundColor: "#b45309",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "6px",
+                      fontSize: "14px",
+                      fontWeight: 500,
+                      cursor: "pointer",
+                    }}
+                  >
+                    복구 정보 내려받기 (JSON)
+                  </button>
+                </div>
+              )}
 
               {result.success && (
                 <div

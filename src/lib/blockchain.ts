@@ -55,6 +55,47 @@ export function getContract(contractAddress: string, abi: any) {
   return new ethers.Contract(contractAddress, abi, provider);
 }
 
+// tokenURI는 mintOwn/setTokenURI로 누구나 임의 값을 써 넣을 수 있는 온체인 데이터다.
+// 서버가 그 값을 그대로 fetch하고 응답 본문까지 돌려주면, 아무나 NFT 하나만 민팅해서
+// 서버에게 내부 주소(169.254.169.254 메타데이터 서비스, localhost 관리 포트 등)를
+// 대신 조회시키고 그 내용을 받아갈 수 있다(SSRF). 이 앱이 실제로 기록하는 tokenURI는
+// Pinata가 돌려주는 ipfs:// 하나뿐이므로, 그것과 공개 게이트웨이만 허용한다.
+const ALLOWED_METADATA_HOSTS = new Set([
+  "ipfs.io",
+  "gateway.pinata.cloud",
+  "cloudflare-ipfs.com",
+  "arweave.net",
+]);
+
+export function resolveTokenURI(tokenURI: string): string {
+  if (!tokenURI) {
+    throw new Error("Token URI가 비어 있습니다.");
+  }
+  if (tokenURI.startsWith("ipfs://")) {
+    return `https://ipfs.io/ipfs/${tokenURI.slice(7)}`;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(tokenURI);
+  } catch {
+    throw new Error("Token URI 형식이 올바르지 않습니다.");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    !ALLOWED_METADATA_HOSTS.has(parsed.hostname)
+  ) {
+    throw new Error(`허용되지 않은 Token URI 호스트입니다: ${parsed.hostname}`);
+  }
+  return parsed.toString();
+}
+
+// Arweave 트랜잭션 ID는 43자 base64url로 고정이다. 이 값도 창작자가 메타데이터에
+// 써 넣는 값이라, 그대로 URL에 이어 붙이기 전에 형식을 확인한다.
+export function isValidArweaveId(id: unknown): id is string {
+  return typeof id === "string" && /^[A-Za-z0-9_-]{43}$/.test(id);
+}
+
 // NFT 소유권 확인
 export async function checkNFTOwnership(
   contractAddress: string,

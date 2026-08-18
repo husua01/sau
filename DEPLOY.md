@@ -36,11 +36,13 @@ cp env.example .env.local
 # .env.local 파일을 편집하여 필수 키 입력
 ```
 
-필수 환경 변수 (4개):
+필수 환경 변수:
 - SEPOLIA_RPC_URL (Alchemy)
 - PINATA_API_KEY, PINATA_SECRET_KEY (Pinata)
-- NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
 - PRIVATE_KEY (MetaMask)
+- NEXT_PUBLIC_LIT_NETWORK (기본값 없음 — 비면 암호화 중단)
+- ARWEAVE_KEY (없으면 콘텐츠 민팅 전부 실패)
+- BLOB_READ_WRITE_TOKEN (없으면 콘텐츠 민팅 전부 실패)
 
 ### 3. 스마트 컨트랙트 배포
 

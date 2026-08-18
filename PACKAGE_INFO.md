@@ -94,12 +94,14 @@ npm run start
 
 ## 필수 환경 변수
 
-배포 전 `.env.local`에 다음 4개 키를 반드시 설정하세요:
+배포 전 `.env.local`에 다음 키들을 반드시 설정하세요:
 
 1. `SEPOLIA_RPC_URL` - Alchemy RPC URL
 2. `PINATA_API_KEY`, `PINATA_SECRET_KEY` - Pinata IPFS
-3. `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` - WalletConnect
-4. `PRIVATE_KEY` - MetaMask 개인키
+3. `PRIVATE_KEY` - MetaMask 개인키
+4. `NEXT_PUBLIC_LIT_NETWORK` - Lit Protocol 네트워크 (기본값 없음)
+5. `ARWEAVE_KEY` - Arweave 지갑 키 (콘텐츠 저장)
+6. `BLOB_READ_WRITE_TOKEN` - Vercel Blob 토큰 (업로드 경유지)
 
 자세한 설정 방법은 `README.md`를 참고하세요.
 

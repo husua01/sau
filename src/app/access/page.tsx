@@ -265,7 +265,11 @@ export default function AccessDataPage() {
       });
 
       const metadataResult = await metadataResponse.json();
-      console.log(" 메타데이터 조회 결과:", metadataResult);
+      // 메타데이터에는 ciphertext/접근조건이 통째로 들어있어 전체를 찍지 않는다.
+      console.log(" 메타데이터 조회 결과:", {
+        success: metadataResult.success,
+        hasData: metadataResult.hasData,
+      });
 
       if (
         metadataResult.success &&
@@ -308,6 +312,7 @@ export default function AccessDataPage() {
           createdAt: properties.createdAt || new Date().toISOString(),
           coverImageUrl: metadata.image || nft.coverImageUrl || null,
           tokenURI: metadataResult.tokenURI,
+          accessConditionWarning: metadataResult.accessConditionWarning ?? null,
         };
 
         setResult(baseResult);
@@ -373,10 +378,10 @@ export default function AccessDataPage() {
     if (!resultData) return null;
     const metadata = resultData.metadata || {};
     const properties = metadata.properties || {};
+    // coverImageMetadataUrl은 이미지가 아니라 JSON 메타데이터 URL이었다 — 후보에서 제외.
     const candidates = [
       properties.coverImageUrl,
       properties.coverImage,
-      properties.coverImageMetadataUrl,
       metadata.image,
     ];
     for (const url of candidates) {
@@ -466,7 +471,10 @@ export default function AccessDataPage() {
 
       const response = await signedFetch("test_access", requestData);
       const responseResult = await response.json();
-      console.log(" API 응답 결과:", responseResult);
+      console.log(" API 응답 결과:", {
+        success: responseResult.success,
+        hasAccess: responseResult.hasAccess,
+      });
       setResult(responseResult);
     } catch (error) {
       setResult({
@@ -484,7 +492,6 @@ export default function AccessDataPage() {
     setDecryptingFile(true);
     try {
       console.log(" 텍스트 복호화 시작:", fileName);
-      console.log(" 암호화 데이터:", encryptionData);
 
       if (!encryptionData) {
         throw new Error("암호화 데이터가 없습니다.");
@@ -581,9 +588,6 @@ export default function AccessDataPage() {
     encryptionData: any,
     fileName: string,
   ) => {
-    console.log(" 복호화 함수 호출 - encryptionData:", encryptionData);
-    console.log(" 복호화 함수 호출 - result:", result);
-
     // result 객체에서 encryptionData 추출
     const actualEncryptionData = encryptionData || result?.encryptionData;
 
@@ -594,7 +598,11 @@ export default function AccessDataPage() {
 
     setDecryptingFile(true);
     try {
-      console.log(" 복호화 시작 - actualEncryptionData:", actualEncryptionData);
+      console.log(" 복호화 시작:", {
+        encryptionType: actualEncryptionData.encryptionType,
+        mimeType: actualEncryptionData.mimeType,
+        encoding: actualEncryptionData.encoding,
+      });
 
       let decryptedTextContent = "";
       let decryptedBytes: Uint8Array | null = null;
@@ -692,10 +700,8 @@ export default function AccessDataPage() {
           previewUrlRef.current = null;
         }
 
+        // 복호화된 평문은 절대 콘솔에 남기지 않는다.
         console.log(" 파일 복호화 완료:", safeFileName);
-        if (mimeType.startsWith("text/") && decryptedTextContent) {
-          console.log(" 텍스트 미리보기:", decryptedTextContent.slice(0, 120));
-        }
         setResult((prev: any) => ({
           ...prev,
           decryptedPreview: previewUrl
@@ -1816,6 +1822,33 @@ export default function AccessDataPage() {
               >
                 데이터 접근 결과
               </h4>
+
+              {/* 창작자가 써 넣은 접근 조건이 이 NFT를 가리키지 않는 경우.
+                  복호화를 시도하기 전에 알려줘야 의미가 있다. */}
+              {result.accessConditionWarning && (
+                <div
+                  style={{
+                    backgroundColor: "#fffbeb",
+                    border: "1px solid #f59e0b",
+                    borderRadius: "8px",
+                    padding: "16px",
+                    marginBottom: "16px",
+                    color: "#92400e",
+                    fontSize: "0.9rem",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  <strong>⚠️ 접근 조건 경고</strong>
+                  <div style={{ marginTop: "8px" }}>
+                    {result.accessConditionWarning}
+                  </div>
+                  <div style={{ marginTop: "8px", fontSize: "0.85rem" }}>
+                    이 NFT의 암호화 설정은 창작자가 지정한 값입니다. 위 경고가
+                    보인다면 이 NFT를 소유하고 있어도 콘텐츠가 열리지 않을 수
+                    있으니, 구매 전이라면 특히 주의하세요.
+                  </div>
+                </div>
+              )}
 
               <div
                 style={{

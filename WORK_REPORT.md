@@ -119,9 +119,9 @@
 
 ## 작업 중 발견한 추가 문제 (미수정)
 
-- `src/lib/lit-protocol.ts`, `src/app/create/page.tsx` — [4-2]로 `@lit-protocol/auth-helpers`(session sig 발급용 `createSiweMessage`/`generateAuthSig`)를 최상단에서 정적 import하게 되면서, `/access`·`/create` 라우트의 First Load JS가 약 198KB → 약 771~773KB로 크게 늘었습니다(`npm run build` 출력 비교로 확인). 기능상 필요한 변경이라 이번 작업 범위에서 되돌리지는 않았지만, 번들 크기를 낮추려면 `lit-protocol.ts`를 완전히 동적 import 전용으로 리팩터링하거나 세션 서명 발급 경로를 지연 로드하는 별도 작업이 필요합니다.
-- `src/app/access/page.tsx`의 `decryptEncryptedFile`/`decryptAndShowText` — [1-6]의 명시적 앵커(`복호화 완료! 텍스트:`)는 제거했지만, 그 주변에 남아있는 `console.log(' 복호화 함수 호출 - encryptionData:', encryptionData)` 등은 여전히 `accessControlConditions`/`dataToEncryptHash`/`ciphertext`가 포함된 객체 전체를 콘솔에 출력합니다. 복호화된 평문은 아니지만 불필요하게 장황한 로깅이라, 앵커 밖이라 이번에는 손대지 않았습니다.
-- `QUICKSTART.md`, `DEPLOY.md`, `PACKAGE_INFO.md` — 여전히 `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`를 언급합니다. [6-3]은 "README와 env.example"만 명시했기에 이 세 파일은 건드리지 않았습니다.
+- ~~`src/lib/lit-protocol.ts` — `@lit-protocol/auth-helpers` 정적 import로 First Load JS가 198KB → 771~773KB로 증가~~ **해결(2026-08-18)**: 실제 사용처가 `getDecryptSessionSigs` 하나뿐이라 그 안으로 `await import()`를 내려 정적 체인을 끊음. `/access` 198KB, `/create` 233KB로 복귀.
+- ~~`src/app/access/page.tsx`가 `accessControlConditions`/`ciphertext` 객체 전체를 콘솔에 출력~~ **해결(2026-08-18)**: 식별용 필드만 남기도록 축소. 이 과정에서 `console.log(' 텍스트 미리보기:', decryptedTextContent.slice(0, 120))`가 **복호화된 평문 앞 120자를 그대로 출력**하고 있던 것을 추가로 발견해 함께 제거함.
+- ~~`QUICKSTART.md`, `DEPLOY.md`, `PACKAGE_INFO.md`의 `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`~~ **해결(2026-08-18)**: 삭제하고 실제 필수값 6개로 교체.
 - `hardhat.config.ts`의 `localnetPrivateKey` 기본값 — `0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80`(Hardhat 표준 "test test test..." 니모닉의 0번 계정 개인키, 업계 전반에 공개된 로컬 전용 테스트 키)가 `localhost`/`localnet` 네트워크 전용 기본값으로 남아 있습니다. §0.2의 "개인키 기본값 폴백 금지" 원칙과 문면상 겹치지만, 실사용 위험이 없는 로컬 전용 관례이고 문서가 앵커로 지목하지 않아 그대로 두었습니다. 필요하다면 이 폴백도 제거 대상으로 재검토할 수 있습니다.
 - `contracts/Sau1155.sol`의 `mintBatch`/`mintBatchWithMetadata`는 여전히 컨트랙트에만 존재하고 프론트엔드에서 호출되지 않습니다(문서 [6-4] 방침대로 "남겨도 무방"이라 그대로 둠).
 

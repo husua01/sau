@@ -4,12 +4,6 @@ import {
   createAccessControlConditions,
 } from "./lit-protocol";
 
-// 파일을 Blob으로 변환하는 함수
-export function createTextFile(content: string, filename: string): File {
-  const blob = new Blob([content], { type: "text/plain" });
-  return new File([blob], filename, { type: "text/plain" });
-}
-
 // 파일을 ArrayBuffer로 읽는 함수
 export async function fileToArrayBuffer(file: File): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {

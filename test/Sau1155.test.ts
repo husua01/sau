@@ -1,10 +1,16 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
+import { loadFixture, time } from "@nomicfoundation/hardhat-network-helpers";
 
 const BASE_URI = "https://api.sauplatform.com/metadata/{id}.json";
 const CONTENT_HASH = "QmTestContentHash";
 const TOKEN_URI = "https://gateway.pinata.cloud/ipfs/QmTestTokenMetadata";
+
+// mintOwn이 요구하는 tokenId 형태: 상위 160비트 = 호출자 주소, 하위 96비트 = 무작위.
+// 프론트엔드 generateTokenId()와 같은 규칙이다.
+function ownTokenId(address: string, suffix: bigint) {
+  return (BigInt(address) << 96n) | suffix;
+}
 
 async function deployFixture() {
   const [admin, minter, creator, holder, other] = await ethers.getSigners();
@@ -79,30 +85,35 @@ describe("Sau1155", function () {
   describe("[3-6] mintOwn — 자기 자신에게만 민팅", function () {
     it("mintOwn은 msg.sender에게만 발행한다", async function () {
       const { sau1155, holder, other } = await loadFixture(deployFixture);
+      const id = ownTokenId(holder.address, 42n);
 
-      await sau1155.connect(holder).mintOwn(42, 1, CONTENT_HASH, TOKEN_URI);
+      await sau1155.connect(holder).mintOwn(id, 1, CONTENT_HASH, TOKEN_URI);
 
-      expect(await sau1155.balanceOf(holder.address, 42)).to.equal(1);
-      expect(await sau1155.balanceOf(other.address, 42)).to.equal(0);
+      expect(await sau1155.balanceOf(holder.address, id)).to.equal(1);
+      expect(await sau1155.balanceOf(other.address, id)).to.equal(0);
 
-      const [, creator] = await sau1155.getTokenInfo(42);
+      const [, creator] = await sau1155.getTokenInfo(id);
       expect(creator).to.equal(holder.address);
     });
 
     it("MINTER_ROLE이 없어도 mintOwn을 호출할 수 있다", async function () {
       const { sau1155, other } = await loadFixture(deployFixture);
 
-      await expect(sau1155.connect(other).mintOwn(99, 1, CONTENT_HASH, TOKEN_URI)).to.not
-        .be.reverted;
+      await expect(
+        sau1155
+          .connect(other)
+          .mintOwn(ownTokenId(other.address, 99n), 1, CONTENT_HASH, TOKEN_URI)
+      ).to.not.be.reverted;
     });
 
     it("mintOwn도 동일 tokenId 재사용을 막는다", async function () {
-      const { sau1155, holder, other } = await loadFixture(deployFixture);
+      const { sau1155, holder } = await loadFixture(deployFixture);
+      const id = ownTokenId(holder.address, 7n);
 
-      await sau1155.connect(holder).mintOwn(7, 1, CONTENT_HASH, TOKEN_URI);
+      await sau1155.connect(holder).mintOwn(id, 1, CONTENT_HASH, TOKEN_URI);
 
       await expect(
-        sau1155.connect(other).mintOwn(7, 1, "other-hash", TOKEN_URI)
+        sau1155.connect(holder).mintOwn(id, 1, "other-hash", TOKEN_URI)
       ).to.be.revertedWith("Token ID already used");
     });
 
@@ -110,12 +121,164 @@ describe("Sau1155", function () {
       const { sau1155, holder } = await loadFixture(deployFixture);
 
       await expect(
-        sau1155.connect(holder).mintOwn(55, 5, CONTENT_HASH, TOKEN_URI)
+        sau1155
+          .connect(holder)
+          .mintOwn(ownTokenId(holder.address, 55n), 5, CONTENT_HASH, TOKEN_URI)
       ).to.be.revertedWith("mintOwn: amount must be 1");
 
       await expect(
-        sau1155.connect(holder).mintOwn(56, 0, CONTENT_HASH, TOKEN_URI)
+        sau1155
+          .connect(holder)
+          .mintOwn(ownTokenId(holder.address, 56n), 0, CONTENT_HASH, TOKEN_URI)
       ).to.be.revertedWith("mintOwn: amount must be 1");
+    });
+  });
+
+  // 이 앱은 민팅 '전에' 콘텐츠를 tokenId로 암호화해 Arweave에 올리므로, mintOwn이
+  // 멤풀에 뜨는 순간 tokenId와 암호문 위치가 함께 공개된다. 아무 제약이 없으면 공격자가
+  // 같은 id로 앞질러 민팅해 소유자가 되고, Lit 접근 조건(balanceOf > 0)을 그대로
+  // 통과해 피해자의 콘텐츠를 복호화할 수 있다.
+  describe("[신규] mintOwn tokenId 선점(front-running) 차단", function () {
+    it("[가장 중요] 공격자는 피해자 주소로 시작하는 tokenId를 선점할 수 없다", async function () {
+      const { sau1155, holder: victim, other: attacker } =
+        await loadFixture(deployFixture);
+
+      // 피해자가 쓰려던, 멤풀에서 그대로 관찰 가능한 tokenId
+      const victimTokenId = ownTokenId(victim.address, 123456789n);
+
+      await expect(
+        sau1155
+          .connect(attacker)
+          .mintOwn(victimTokenId, 1, "stolen", TOKEN_URI)
+      ).to.be.revertedWith("mintOwn: id must be prefixed with caller");
+
+      // 피해자는 정상적으로 민팅할 수 있고, 소유자는 피해자다
+      await sau1155
+        .connect(victim)
+        .mintOwn(victimTokenId, 1, CONTENT_HASH, TOKEN_URI);
+      expect(await sau1155.balanceOf(victim.address, victimTokenId)).to.equal(1);
+      expect(await sau1155.balanceOf(attacker.address, victimTokenId)).to.equal(0);
+    });
+
+    it("접두사가 없는 임의의 작은 tokenId도 거부된다", async function () {
+      const { sau1155, holder } = await loadFixture(deployFixture);
+
+      await expect(
+        sau1155.connect(holder).mintOwn(42, 1, CONTENT_HASH, TOKEN_URI)
+      ).to.be.revertedWith("mintOwn: id must be prefixed with caller");
+    });
+
+    it("tokenIdPrefixOf는 프론트엔드의 tokenId 생성 규칙과 일치한다", async function () {
+      const { sau1155, holder } = await loadFixture(deployFixture);
+
+      // src/app/create/page.tsx의 generateTokenId()와 같은 계산
+      expect(await sau1155.tokenIdPrefixOf(holder.address)).to.equal(
+        BigInt(holder.address)
+      );
+      expect(ownTokenId(holder.address, 1n) >> 96n).to.equal(
+        BigInt(holder.address)
+      );
+    });
+  });
+
+  // balanceOf > 0만 보면 NFT를 몇 분 빌려 복호화하고 반납하는 경로가 그대로 열린다.
+  // Lit의 evmContractConditions가 이 함수를 호출해 최소 보유 기간을 확인한다.
+  describe("[신규] hasHeldFor — 대여 우회 방어", function () {
+    const ONE_HOUR = 3600;
+
+    it("[가장 중요] 방금 넘겨받은 주소는 최소 보유 기간을 못 채워 거부된다", async function () {
+      const { sau1155, holder, other } = await loadFixture(deployFixture);
+      const id = ownTokenId(holder.address, 1n);
+      await sau1155.connect(holder).mintOwn(id, 1, CONTENT_HASH, TOKEN_URI);
+
+      // "빌려서 받는" 순간 — 잔액은 있지만 시계는 0초부터 시작
+      await sau1155
+        .connect(holder)
+        .safeTransferFrom(holder.address, other.address, id, 1, "0x");
+
+      expect(await sau1155.balanceOf(other.address, id)).to.equal(1);
+      expect(await sau1155.hasAccess(other.address, id)).to.equal(true);
+      expect(await sau1155.hasHeldFor(other.address, id, ONE_HOUR)).to.equal(
+        false
+      );
+    });
+
+    it("최소 보유 기간을 넘기면 통과한다", async function () {
+      const { sau1155, holder, other } = await loadFixture(deployFixture);
+      const id = ownTokenId(holder.address, 2n);
+      await sau1155.connect(holder).mintOwn(id, 1, CONTENT_HASH, TOKEN_URI);
+      await sau1155
+        .connect(holder)
+        .safeTransferFrom(holder.address, other.address, id, 1, "0x");
+
+      await time.increase(ONE_HOUR + 1);
+
+      expect(await sau1155.hasHeldFor(other.address, id, ONE_HOUR)).to.equal(
+        true
+      );
+    });
+
+    it("[가장 중요] 빌렸다 반납하면 기록이 지워져, 다시 빌려도 즉시 통과하지 못한다", async function () {
+      const { sau1155, holder, other } = await loadFixture(deployFixture);
+      const id = ownTokenId(holder.address, 3n);
+      await sau1155.connect(holder).mintOwn(id, 1, CONTENT_HASH, TOKEN_URI);
+
+      // 1회차: 빌려서 오래 보유했다가 반납
+      await sau1155
+        .connect(holder)
+        .safeTransferFrom(holder.address, other.address, id, 1, "0x");
+      await time.increase(ONE_HOUR + 1);
+      await sau1155
+        .connect(other)
+        .safeTransferFrom(other.address, holder.address, id, 1, "0x");
+      expect(await sau1155.holdingSince(id, other.address)).to.equal(0);
+
+      // 2회차: 다시 빌리면 시계가 0부터 — 옛 기록으로 통과하면 안 된다
+      await sau1155
+        .connect(holder)
+        .safeTransferFrom(holder.address, other.address, id, 1, "0x");
+      expect(await sau1155.hasHeldFor(other.address, id, ONE_HOUR)).to.equal(
+        false
+      );
+    });
+
+    it("창작자는 대기 없이 통과한다 (이미 원본 평문을 갖고 있음)", async function () {
+      const { sau1155, holder } = await loadFixture(deployFixture);
+      const id = ownTokenId(holder.address, 4n);
+      await sau1155.connect(holder).mintOwn(id, 1, CONTENT_HASH, TOKEN_URI);
+
+      expect(await sau1155.hasHeldFor(holder.address, id, ONE_HOUR)).to.equal(
+        true
+      );
+    });
+
+    it("아예 보유하지 않은 주소는 기간과 무관하게 거부된다", async function () {
+      const { sau1155, holder, other } = await loadFixture(deployFixture);
+      const id = ownTokenId(holder.address, 5n);
+      await sau1155.connect(holder).mintOwn(id, 1, CONTENT_HASH, TOKEN_URI);
+
+      await time.increase(ONE_HOUR * 24);
+
+      expect(await sau1155.hasHeldFor(other.address, id, ONE_HOUR)).to.equal(
+        false
+      );
+      expect(await sau1155.hasHeldFor(other.address, id, 0)).to.equal(false);
+    });
+
+    it("이미 보유 중인 주소가 추가 수량을 받아도 시계가 되돌아가지 않는다", async function () {
+      const { sau1155, minter, holder } = await loadFixture(deployFixture);
+
+      await sau1155.connect(minter).mint(holder.address, 77, 1, CONTENT_HASH);
+      const since = await sau1155.holdingSince(77, holder.address);
+
+      await time.increase(ONE_HOUR + 1);
+      await sau1155.connect(minter).mint(holder.address, 78, 1, CONTENT_HASH);
+      // 같은 id로 추가 수량을 받는 경로 (배치 전송)
+      await sau1155
+        .connect(holder)
+        .safeTransferFrom(holder.address, holder.address, 77, 1, "0x");
+
+      expect(await sau1155.holdingSince(77, holder.address)).to.equal(since);
     });
   });
 
